@@ -1,0 +1,352 @@
+---
+title: "Predikere boligpriser - løsningsforslag"
+author: "André Waage Rivenæs"
+date: "25 11 2019"
+output: 
+ html_document:
+   toc: true
+   toc_float: true
+   toc_depth: 3
+   number_sections: true
+   theme: cerulean
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+```
+
+# Innlasting av data
+Først importerer vi all data og laster relevante pakker.
+
+OBS: Under gjennomgangen var det kun et utvalg fra "income" som var inkludert. Her tar vi med alle. 
+```{r}
+
+library(tidyverse)
+library(skimr)
+library(readxl)
+library(recipes)
+library(rsample)
+library(parsnip)
+library(yardstick)
+
+theme_set(theme_minimal())
+
+# Read all excel-files
+ads_raw <- read_excel("input/ads.xlsx")
+geo_raw <- read_excel("input/geo.xlsx")
+zip_raw <- read_excel("input/zip.xlsx")
+inc_raw <- read_excel("input/income.xlsx")
+att_raw <- read_excel("input/attributes.xlsx")
+
+# Select relevant columns
+municipalities <- geo_raw %>% 
+  select(ad_id, kommune_no, kommune_name, fylke_no, fylke_name)
+
+income <- inc_raw %>% 
+  select(-kommune, - poststed) %>% 
+  rename(zip_no = postnr, 
+         avg_income = gjsnitt_inntekt, 
+         avg_fortune = gjsnitt_formue
+         )
+
+# Join data
+ads <- ads_raw %>% 
+  select(-ad_title, -ad_address, -ad_url, -ad_img) %>%
+  left_join(municipalities, by = "ad_id") %>% 
+  left_join(zip_raw, by = "ad_id") %>% 
+  left_join(income, by = "zip_no") %>% 
+  left_join(att_raw, by = "ad_id") 
+
+# Remove unnecesarry objects
+rm(ads_raw, geo_raw, zip_raw, inc_raw, att_raw, income, municipalities)
+
+# Replace NA and modify variables
+ads <- ads %>%
+  replace_na(list(ad_debt = 0,
+                  ad_expense = 0)) %>%
+  mutate(
+    ad_tot_price         = ad_price + ad_debt,
+    ad_tot_price_per_sqm = ad_tot_price / ad_sqm,
+    ad_bedrooms          = parse_number(ad_bedrooms)
+  )
+
+# Split in train/test
+set.seed(42)
+
+finn_split     <- initial_split(ads)
+finn_train_raw <- training(finn_split)
+finn_test_raw  <- testing(finn_split)
+```
+
+# Eksplorativ analyse
+
+## Boligpris
+Under ser vi fordelingen av boligpriser.
+
+```{r}
+ads %>%
+  ggplot(aes(x = ad_tot_price)) +
+  geom_density(fill = "cornflowerblue") +
+  xlim(c(0, 2e7)) +
+  geom_vline(xintercept = mean(ads$ad_tot_price), linetype = "dashed")
+```
+
+Som ventet er det en topp rundt 3.5 millioner. Som ventet ser vi at variabelen har en tung hale til høyre, som gjør at snittet er betydelig høyere enn medianverdien. Dersom vi skulle predikert boligpris direkte ved hjelp av GLM så taler dette for at vi måtte brukt en gamma-regresjon, eventuelt en OLS-modell der venstresiden har blitt log-transformert. 
+
+Vi kan også splitte opp per fylke:
+
+```{r}
+ads %>%
+  ggplot(aes(x = ad_tot_price)) +
+  geom_density(fill = "cornflowerblue") +
+  xlim(c(0, 2e7)) +
+  facet_wrap(~ fylke_name)
+```
+
+Umiddelbart ser vi at fordelingene er forholdsvis forskjellig for de ulike fylkene, eksempelvis er fordelingen i Oslo mye mer høyretung. At fordelingen er såpass forskjellig per fylke kan indikere et behov for betydelige interaksjonseffekter på geografi-nivå. 
+
+## Utvalgte forklaringsvariabler
+### Inntekt
+```{r}
+ads %>%
+  ggplot(aes(x = avg_income)) +
+  geom_density(fill = "cornflowerblue") +
+  xlim(c(0, 2e6)) +
+  geom_vline(xintercept = mean(ads$avg_income), linetype = "dashed")
+```
+
+Ved hjelp av en log-transformasjon kan vi få en mer normalfordelt variabel som er enklere for modellen å utnytte:
+
+```{r}
+ads %>%
+  ggplot(aes(x = log(avg_income))) +
+  geom_density(fill = "cornflowerblue") +
+  geom_vline(xintercept = mean(ads$avg_income), linetype = "dashed")
+```
+
+Vi kan også undersøke den univariate sammenhengen mellom inntekt og boligpriser:
+
+```{r}
+ads %>%
+  ggplot(aes(x = log(avg_income), y = ad_tot_price)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth()
+```
+
+Vi ser at i hovedsak er høyere inntekt forbundet med høyere boligpriser, men det ser også ut til å være noen avvik på venstresiden hvor sammenhengen er svakt motsatt. La oss undersøke disse observasjonene helt til venstre litt nærmere. 
+
+```{r}
+ads %>%
+  filter(log(avg_income) < 11.5) %>%
+  select(ad_tot_price, zip_no, zip_name, fylke_name, ad_sqm) %>%
+  DT::datatable(rownames = FALSE)
+```
+
+Vi ser det er snakk om et utvalg av boliger i postkoden "0150". Nærmere undersøkelser viser at dette er et område som blant annet omfatter 3 øyer like utenfor Oslo, så man kan nok anta at dette er en anomalitet. Disse boligene har også blitt solgt for usedvanlig høye kvadratmeterpriser, men dette bør xgboost-modellen klare å plukke opp selv.  
+
+### Geografi
+Kunne vi fått inn et kart her, med sammenheng mellom boligpriser og breddegrad/lengdegrad? 
+
+### Kvadratmeter
+
+Figuren viser fordeling av kvadratmeter. 
+```{r}
+ads %>%
+  ggplot(aes(x = ad_sqm)) +
+  geom_density(fill = "cornflowerblue") +
+  geom_vline(xintercept = mean(ads$ad_sqm), linetype = "dashed") +
+  xlim(c(0, 350))
+```
+
+Figuren under viser den estimerte univariate sammenhengen mellom prisen og antall kvadratmeter (ved bruk av GAM).
+
+```{r}
+ads %>%
+  filter(ad_sqm < 400) %>% 
+  ggplot(aes(x = ad_sqm, y = ad_tot_price)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth() +
+  scale_y_log10()
+```
+
+Vi ser umiddelbart at prisen er monotont økende med ad_sqm, men flater gradvis ut. Skal vi bruke denne variabelen i en regresjonsmodell kan det derfor være lurt å log-transformere den, for da får vi følgende funksjonsform:
+
+```{r}
+ads %>%
+  filter(ad_sqm < 400) %>% 
+  ggplot(aes(x = log(ad_sqm), y = ad_tot_price)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth() +
+  scale_y_log10()
+```
+
+Vi ser at med en log-transformasjon får vi en tilnærmet lineær sammenheng. 
+
+Bemerk også forholdet mellom ad_sqm_use og ad_sqm:
+
+```{r}
+ads %>%
+  filter(ad_sqm < 300, ad_sqm_use < 300) %>% 
+  ggplot(aes(x = ad_sqm_use, y = ad_sqm)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(color = "red", type = "dashed")
+```
+
+Vi ser at verdiene ofte er identisk eller evt at ad_sqm_use er litt høyere. Dette er viktig å hensynta når vi skal behandle missing verdier for ad_sqm_use, for det gir ingen mening å impute ad_sqm_use uten å hensynta verdien til ad_sqm. 
+
+# Lag modell
+## xgboost
+Først lager vi en recipe:
+```{r}
+xg_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>% 
+  step_mutate(ad_home_type  = fct_lump(ad_home_type, 6),
+              ad_owner_type = fct_lump(ad_owner_type, 3),
+              kommune_name = fct_lump(kommune_name, 150),
+              bedrooms_missing = is.na(ad_bedrooms),
+              ad_sqm_use = if_else(is.na(ad_sqm_use), ad_sqm, ad_sqm_use)) %>%
+  step_rm(ad_id, 
+          ad_price,
+          ad_tot_price_per_sqm,
+          ad_debt, 
+          kommune_no, 
+          fylke_name, 
+          zip_no, 
+          zip_name) %>%
+  step_log(avg_income, avg_fortune) %>% 
+  prep()
+
+finn_train <- bake(xg_recipe, finn_train_raw)
+finn_test  <- bake(xg_recipe, finn_test_raw)
+
+```
+
+Så trener vi modellen:
+
+```{r}
+xg_mod <- boost_tree(mode = "regression",
+                     trees = 400,
+                     mtry = 0.8,
+                     min_n = 3,
+                     tree_depth = 6,
+                     learn_rate = 0.08,
+                     loss_reduction = 0) %>% 
+  set_engine("xgboost", tree_method = "exact") %>% 
+  fit(ad_tot_price ~ ., data = finn_train)
+```
+
+Valider modell:
+
+```{r}
+prediction <- predict(xg_mod, finn_test) %>% 
+  bind_cols(finn_test_raw) %>% 
+  rename(estimate     = .pred, 
+         truth        = ad_tot_price) %>%
+  mutate(abs_dev      = abs(truth - estimate),
+         abs_dev_perc = abs_dev/truth)
+
+multi_metric <- metric_set(mape, rmse, mae, rsq)
+
+prediction %>%
+  multi_metric(truth = truth, estimate = estimate)
+```
+
+Finn variabelimportance:
+
+```{r}
+xgboost::xgb.importance(model = xg_mod$fit) %>% 
+  xgboost::xgb.ggplot.importance(top_n = 30)
+```
+
+## GLM - klassifisering
+
+Når vi lager en GLM-modell er det viktig å tenke på at enkelte ting som man kommer unna med i en trebasert-modell, ikke vil fungere i LM-universet. F.eks. kan vi ikke hive inn breddegrader og lengdegrader direkte i modellen, da man ikke kan anta at disse har en fornuftig kontinuerlig sammenheng med responsvariabelen. 
+
+Istedenfor velger vi å lage en faktor av avrundet lengde- og breddegrader, som tillater modellen å estimere egne koeffisienter per lengde og breddegrad.
+
+En annen ting vi bør gjøre er å lage en interaksjonseffekt mellom geografi og kvadratmeterpriser. Ellers tillater vi ikke modellen å estimere forskjeller i økning i pris for 1 ekstra kvadratmeter i Oslo enn pris for 1 ekstra kvadratmeter ellers. 
+
+```{r}
+glm_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>% 
+  step_mutate(ad_home_type  = fct_lump(ad_home_type, 6),
+              ad_owner_type = fct_lump(ad_owner_type, 2),
+              fylke_no = fct_lump(fylke_no, 16),
+              ad_bedrooms = if_else(is.na(ad_bedrooms), 0, ad_bedrooms),
+              kommune_name = fct_lump(kommune_name, 30),
+              ad_sqm_use = if_else(is.na(ad_sqm_use), ad_sqm, ad_sqm_use),
+              is_expensive = as.factor(ad_tot_price > 4000000),
+              lng_factor = as.factor(round(lng, digits = 0)),
+              lat_factor = as.factor(round(lat, digits = 0))) %>%
+  step_medianimpute(all_numeric()) %>%
+  step_modeimpute(all_nominal()) %>% 
+  step_log(gjsnitt_skatt, avg_income, avg_fortune, ad_sqm, offset = 1) %>% 
+  step_rm(ad_id) %>% 
+  prep()
+
+finn_train <- bake(glm_recipe, finn_train_raw)
+finn_test  <- bake(glm_recipe, finn_test_raw)
+
+
+glm_mod <- logistic_reg() %>%
+  set_engine("glm") %>%
+  fit(
+    is_expensive ~ 
+      ad_owner_type
+    + ad_home_type
+    + ad_bedrooms
+    # Merk: Dette interaksjonsleddet gjor at antall kvadratmeter kan ha forskjellig betydning
+    # forskjellige steder
+    + kommune_name * ad_sqm
+    + fylke_no
+    + gjsnitt_skatt
+    + ad_sqm
+    #+ ad_expense
+    + poly(avg_income, 2)
+    + poly(avg_fortune, 2)
+    + ad_built
+    + lng_factor
+    #+ lat_factor
+    #+ bedrooms_missing
+    + ad_floor
+    + ad_elevator
+    #+ rnk_skatt
+    + endring_medianinntekt
+    + antall_skatteytere,
+    data = finn_train
+  )
+
+# View summary
+#summary(glm_mod$fit)
+broom::tidy(glm_mod) %>%
+  mutate_if(is.numeric, ~ round(.x, 3)) %>%
+  DT::datatable()
+```
+
+Finn ROC:
+
+```{r}
+prediction <- predict(glm_mod, finn_test, type = "prob") %>% 
+  bind_cols(finn_test) %>% 
+  rename(estimate     = .pred_TRUE, 
+         truth        = is_expensive)
+
+# Evaluate model (NOTE: we need different metrics since this is classification!)
+prediction %>%
+  yardstick::roc_auc(truth, estimate)
+
+```
+
+```{r}
+prediction %>%
+  yardstick::roc_curve(truth = truth, estimate = estimate, na_rm = T) %>% 
+  autoplot()
+```
+
+Vi kan visualisere effekten av interaksjonsleddet vårt mellom geografi og kvadratmeterpris:
+
+```{r}
+# Interaksjonseffekt ad_sqm
+visreg::visreg(glm_mod$fit, "ad_sqm", by = "kommune_name", scale = "response") 
+```
+
+Vi ser at enkelte kommuner har en flatere S-kurve, som betyr at 1 kvadratmeter ekstra har mindre å bety for om boligen er dyr eller ikke.

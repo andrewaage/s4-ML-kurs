@@ -1,3 +1,4 @@
+
 # Create classification model
 glm_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>% 
   step_mutate(ad_home_type  = fct_lump(ad_home_type, 4),
@@ -42,3 +43,5 @@ prediction %>%
 prediction %>%
   yardstick::roc_curve(truth = truth, estimate = estimate, na_rm = T) %>% 
   autoplot()
+
+

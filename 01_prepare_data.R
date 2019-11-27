@@ -5,6 +5,8 @@ library(skimr)
 library(readxl)
 library(recipes)
 library(rsample)
+library(parsnip)
+library(yardstick)
 
 # Read all excel-files
 ads_raw <- read_excel("input/ads.xlsx")
@@ -18,7 +20,11 @@ municipalities <- geo_raw %>%
   select(ad_id, kommune_no, kommune_name, fylke_no, fylke_name)
 
 income <- inc_raw %>% 
-  select(zip_no = postnr, avg_income = gjsnitt_inntekt, avg_fortune = gjsnitt_formue)
+  select(-kommune, - poststed) %>% 
+  rename(zip_no = postnr, 
+         avg_income = gjsnitt_inntekt, 
+         avg_fortune = gjsnitt_formue
+         )
 
 # Join data
 ads <- ads_raw %>% 
