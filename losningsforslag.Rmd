@@ -106,7 +106,66 @@ ads %>%
 
 Umiddelbart ser vi at fordelingene er forholdsvis forskjellig for de ulike fylkene, eksempelvis er fordelingen i Oslo mye mer høyretung. At fordelingen er såpass forskjellig per fylke kan indikere et behov for betydelige interaksjonseffekter på geografi-nivå. 
 
-## Utvalgte forklaringsvariabler
+## Forklaringsvariabler
+Begynner med å plotte fordelingen til alle variablene for å få oversikt. 
+```{r}
+gg_num_density <- ads %>% 
+  select_if(is.numeric) %>% 
+  select( - c(ad_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
+  pivot_longer(- ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
+  ggplot(aes(x = verdi)) + 
+  geom_density()
+
+map(1:4, ~ {gg_num_density + ggforce::facet_wrap_paginate(~variabel, scales = "free", ncol = 3, nrow = 3, page = .x)})
+```
+
+```{r}
+ads %>% 
+  select(ad_tot_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view, ad_owner_type, ad_home_type) %>% 
+  mutate_at(vars(-ad_tot_price), as.factor) %>% 
+  pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
+  ggplot(aes(x = verdi)) +
+  geom_bar() + 
+  facet_wrap(~ variabel, scales = "free")
+  
+```
+Selv om figurene fremstår rotete og uoversiktlige gir det god innsikt i variablene, og gir ideer om hvilke som trenger videre behandling. 
+
+Videre ser vi på sammenhengen mellom forklaringsvariablene og responsvariabelen. 
+```{r}
+gg_num_smooth <- ads %>% 
+  select_if(is.numeric) %>% 
+  select( - c(ad_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
+  pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
+  ggplot(aes(x = verdi, y = ad_tot_price)) + 
+  geom_point(alpha = 0.1) + 
+  geom_smooth() 
+
+map(1:4, ~ {gg_num_smooth + ggforce::facet_wrap_paginate(~variabel, scales = "free", ncol = 3, nrow = 3, page = .x)})
+```
+
+```{r}
+ads %>% 
+  select(ad_tot_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view, ad_owner_type, ad_home_type) %>% 
+  mutate_at(vars(-ad_tot_price), as.factor) %>% 
+  pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
+  ggplot(aes(x = verdi, y = ad_tot_price)) +
+  geom_boxplot() + 
+  facet_wrap(~ variabel, scales = "free")
+  
+```
+
+Vi ser også på korrelasjonen mellom variablene. 
+
+```{r}
+ads %>% 
+  select_if(is.numeric) %>% 
+  cor(use = "pairwise.complete.obs") %>% 
+  corrplot::corrplot(type = "upper")
+```
+
+Basert på figurene over ønsker vi å se nærmere på et par av variablene. 
+
 ### Inntekt
 ```{r}
 ads %>%
@@ -257,6 +316,7 @@ Finn variabelimportance:
 xgboost::xgb.importance(model = xg_mod$fit) %>% 
   xgboost::xgb.ggplot.importance(top_n = 30)
 ```
+
 
 ## GLM - klassifisering
 
