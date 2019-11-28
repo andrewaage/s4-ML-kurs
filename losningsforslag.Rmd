@@ -205,7 +205,34 @@ ads %>%
 Vi ser det er snakk om et utvalg av boliger i postkoden "0150". Nærmere undersøkelser viser at dette er et område som blant annet omfatter 3 øyer like utenfor Oslo, så man kan nok anta at dette er en anomalitet. Disse boligene har også blitt solgt for usedvanlig høye kvadratmeterpriser, men dette bør xgboost-modellen klare å plukke opp selv.  
 
 ### Geografi
-Kunne vi fått inn et kart her, med sammenheng mellom boligpriser og breddegrad/lengdegrad? 
+
+```{r}
+ads %>% 
+  select(ad_tot_price, lng, lat) %>% 
+  filter(lat > 60 & lng < 40) %>% 
+  pivot_longer(- ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
+  ggplot(aes(verdi, ad_tot_price)) + 
+  geom_point() + 
+  geom_smooth() + 
+  facet_wrap(~variabel, scales = "free")
+```
+Som forventet ser vi at det ikke er en klar sammenheng mellom pris og lengdegrad, heller ikke mellom pris og breddegrad. (Det er likevel enkelt å se hvilke breddegrad og lengdegrad storbyene er på.) Vi må derfor se de to variablene i sammenheng 
+
+```{r}
+ads %>% 
+  mutate(lng_cat = cut(lng, breaks = c(-Inf, seq(0, 35, by = 1), Inf)),
+         lat_cat = cut(lat, breaks = c(-Inf, seq(60, 75, by = .5), Inf))) %>% 
+  group_by(lat_cat, lng_cat) %>% 
+  summarise(snitt_pris = mean(ad_tot_price),
+            snitt_lng = median(lng),
+            snitt_lat = median(lat)) %>% 
+  filter(snitt_pris > 3e05 & snitt_lat > 50) %>% 
+  ggplot(aes(x = snitt_lng, y = snitt_lat, color = snitt_pris, size = snitt_pris)) + 
+  geom_point() + 
+  xlim(c(0,50))
+```
+
+
 
 ### Kvadratmeter
 
@@ -410,3 +437,4 @@ visreg::visreg(glm_mod$fit, "ad_sqm", by = "kommune_name", scale = "response")
 ```
 
 Vi ser at enkelte kommuner har en flatere S-kurve, som betyr at 1 kvadratmeter ekstra har mindre å bety for om boligen er dyr eller ikke.
+
