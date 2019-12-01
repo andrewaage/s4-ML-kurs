@@ -1,6 +1,6 @@
 ---
 title: "Predikere boligpriser - løsningsforslag"
-author: "André Waage Rivenæs"
+author: "André Waage Rivenæs & Markus Mortensen"
 date: "25 11 2019"
 output: 
  html_document:
@@ -29,6 +29,7 @@ library(recipes)
 library(rsample)
 library(parsnip)
 library(yardstick)
+library(sf)
 
 theme_set(theme_minimal())
 
@@ -108,60 +109,76 @@ Umiddelbart ser vi at fordelingene er forholdsvis forskjellig for de ulike fylke
 
 ## Forklaringsvariabler
 Begynner med å plotte fordelingen til alle variablene for å få oversikt. 
+
+For numeriske variabler plotter vi density plots:
 ```{r}
 gg_num_density <- ads %>% 
   select_if(is.numeric) %>% 
   select( - c(ad_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
   pivot_longer(- ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
   ggplot(aes(x = verdi)) + 
-  geom_density()
+  geom_density(fill = "steelblue")
 
 map(1:4, ~ {gg_num_density + ggforce::facet_wrap_paginate(~variabel, scales = "free", ncol = 3, nrow = 3, page = .x)})
 ```
+
+Mens for kategori-variabler kan vi bruke barplott:
 
 ```{r}
 ads %>% 
   select(ad_tot_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view, ad_owner_type, ad_home_type) %>% 
   mutate_at(vars(-ad_tot_price), as.factor) %>% 
   pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
-  ggplot(aes(x = verdi)) +
-  geom_bar() + 
+  ggplot(aes(x = fct_lump(verdi, 15))) +
+  geom_bar(fill = "steelblue", color = "black") + 
+  coord_flip() +
   facet_wrap(~ variabel, scales = "free")
   
 ```
-Selv om figurene fremstår rotete og uoversiktlige gir det god innsikt i variablene, og gir ideer om hvilke som trenger videre behandling. 
 
 Videre ser vi på sammenhengen mellom forklaringsvariablene og responsvariabelen. 
+
+For numeriske variabler kan vi bruke geom_smooth, som bruker GAM til å tilpasse en passende funksjonsform mellom utfallsvariabelen og den gitte responsvariabelen. 
+
 ```{r}
 gg_num_smooth <- ads %>% 
   select_if(is.numeric) %>% 
-  select( - c(ad_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
+  select( - c(ad_price, ad_id, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
   pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
   ggplot(aes(x = verdi, y = ad_tot_price)) + 
   geom_point(alpha = 0.1) + 
+  scale_y_log10() +
   geom_smooth() 
 
 map(1:4, ~ {gg_num_smooth + ggforce::facet_wrap_paginate(~variabel, scales = "free", ncol = 3, nrow = 3, page = .x)})
 ```
 
+For kategorivariabler kan vi f.eks. bruke box plots:
+
 ```{r}
 ads %>% 
   select(ad_tot_price, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view, ad_owner_type, ad_home_type) %>% 
   mutate_at(vars(-ad_tot_price), as.factor) %>% 
   pivot_longer(-ad_tot_price, names_to = "variabel", values_to = "verdi") %>% 
-  ggplot(aes(x = verdi, y = ad_tot_price)) +
-  geom_boxplot() + 
-  facet_wrap(~ variabel, scales = "free")
+  ggplot(aes(x = fct_reorder(fct_lump(verdi, 15), ad_tot_price), y = ad_tot_price)) +
+  geom_boxplot(fill = "steelblue") + 
+  coord_flip() +
+  scale_y_log10() +
+  facet_wrap(~ variabel, scales = "free_y") +
+  labs(x = NULL)
   
 ```
 
 Vi ser også på korrelasjonen mellom variablene. 
 
-```{r}
-ads %>% 
+```{r, width = 10}
+corr <- ads %>% 
   select_if(is.numeric) %>% 
-  cor(use = "pairwise.complete.obs") %>% 
-  corrplot::corrplot(type = "upper")
+  select(- starts_with("rnk")) %>%
+  select( - c(ad_price, ad_id, ad_balcony, ad_elevator, ad_fireplace, ad_garage, ad_garden, ad_view)) %>% 
+  cor(use = "pairwise.complete.obs")
+
+ggcorrplot::ggcorrplot(corr)
 ```
 
 Basert på figurene over ønsker vi å se nærmere på et par av variablene. 
@@ -216,22 +233,37 @@ ads %>%
   geom_smooth() + 
   facet_wrap(~variabel, scales = "free")
 ```
+
 Som forventet ser vi at det ikke er en klar sammenheng mellom pris og lengdegrad, heller ikke mellom pris og breddegrad. (Det er likevel enkelt å se hvilke breddegrad og lengdegrad storbyene er på.) Vi må derfor se de to variablene i sammenheng 
 
 ```{r}
-ads %>% 
+
+world <- sf::st_as_sf(maps::map('world', plot = FALSE, fill = TRUE))
+
+map_summary <- ads %>% 
   mutate(lng_cat = cut(lng, breaks = c(-Inf, seq(0, 35, by = 1), Inf)),
          lat_cat = cut(lat, breaks = c(-Inf, seq(60, 75, by = .5), Inf))) %>% 
   group_by(lat_cat, lng_cat) %>% 
   summarise(snitt_pris = mean(ad_tot_price),
             snitt_lng = median(lng),
             snitt_lat = median(lat)) %>% 
-  filter(snitt_pris > 3e05 & snitt_lat > 50) %>% 
-  ggplot(aes(x = snitt_lng, y = snitt_lat, color = snitt_pris, size = snitt_pris)) + 
-  geom_point() + 
-  xlim(c(0,50))
+  filter(snitt_pris > 3e05 & snitt_lat > 50)
+
+
+ggplot(data = world) +
+  geom_sf() +
+  geom_point(data = map_summary, aes(x = snitt_lng, y = snitt_lat, color = snitt_pris), size = 2.5) +
+  coord_sf(xlim = c(0, 40),
+           ylim = c(55, 75),
+           expand = FALSE) +
+  scale_color_viridis_c()
 ```
 
+Vi ser at det er ganske store regionale forskjeller, også innad i fylker. Dette indikerer at geografi-variabler bør få mye oppmerksomhet i modellutviklingen.
+
+```{r, include = FALSE}
+rm(corr, gg_num_density, gg_num_smooth, world)
+```
 
 
 ### Kvadratmeter
@@ -281,6 +313,22 @@ ads %>%
 
 Vi ser at verdiene ofte er identisk eller evt at ad_sqm_use er litt høyere. Dette er viktig å hensynta når vi skal behandle missing verdier for ad_sqm_use, for det gir ingen mening å impute ad_sqm_use uten å hensynta verdien til ad_sqm. 
 
+## Soverom
+
+Datasettet (ads) består av 1935 NA’s for ‘ad_bedrooms’. Vi ser at det er en sterk sammenheng mellom antall soverom og antall kvadratmeter: 
+
+```{r}
+ads %>% 
+  filter(ad_sqm < 300,
+         ad_bedrooms < 10) %>% 
+  ggplot(aes(ad_sqm, ad_bedrooms)) +
+  geom_jitter(color = 'forestgreen', alpha = 0.1) +
+  geom_smooth(color = 'black') +
+  theme_light() 
+```
+
+Dermed kan det virke som en god idé å impute ad_bedrooms basert på ad_sqm, f.eks. ved å bruke step_knnimpute. 
+
 # Lag modell
 ## xgboost
 Først lager vi en recipe:
@@ -290,7 +338,8 @@ xg_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>%
               ad_owner_type = fct_lump(ad_owner_type, 3),
               kommune_name = fct_lump(kommune_name, 150),
               bedrooms_missing = is.na(ad_bedrooms),
-              ad_sqm_use = if_else(is.na(ad_sqm_use), ad_sqm, ad_sqm_use)) %>%
+              ad_sqm_use = if_else(is.na(ad_sqm_use), ad_sqm, ad_sqm_use),
+              zip_start = as.numeric(substr(zip_no, 0, 2))) %>%
   step_rm(ad_id, 
           ad_price,
           ad_tot_price_per_sqm,
@@ -300,6 +349,7 @@ xg_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>%
           zip_no, 
           zip_name) %>%
   step_log(avg_income, avg_fortune) %>% 
+  step_knnimpute(ad_bedrooms, impute_with = imp_vars(ad_sqm, ad_sqm_use)) %>%
   prep()
 
 finn_train <- bake(xg_recipe, finn_train_raw)
@@ -309,12 +359,14 @@ finn_test  <- bake(xg_recipe, finn_test_raw)
 
 Så trener vi modellen:
 
+(merk: modellen burde tunes ved 10-fold CV. Vi dekket ikke dette i kurset ettersom tidymodels-pakken tune ikke er klar enda)
+
 ```{r}
 xg_mod <- boost_tree(mode = "regression",
                      trees = 400,
                      mtry = 0.8,
                      min_n = 3,
-                     tree_depth = 6,
+                     tree_depth = 7,
                      learn_rate = 0.08,
                      loss_reduction = 0) %>% 
   set_engine("xgboost", tree_method = "exact") %>% 
@@ -363,7 +415,8 @@ glm_recipe <- recipe(ad_tot_price ~. , data = finn_train_raw) %>%
               ad_sqm_use = if_else(is.na(ad_sqm_use), ad_sqm, ad_sqm_use),
               is_expensive = as.factor(ad_tot_price > 4000000),
               lng_factor = as.factor(round(lng, digits = 0)),
-              lat_factor = as.factor(round(lat, digits = 0))) %>%
+              lat_factor = as.factor(round(lat, digits = 0)),
+              zip_factor = fct_lump(as.factor(substr(zip_no, 0, 2)), 20)) %>%
   step_medianimpute(all_numeric()) %>%
   step_modeimpute(all_nominal()) %>% 
   step_log(gjsnitt_skatt, avg_income, avg_fortune, ad_sqm, offset = 1) %>% 
@@ -392,6 +445,7 @@ glm_mod <- logistic_reg() %>%
     + poly(avg_fortune, 2)
     + ad_built
     + lng_factor
+    + zip_factor
     #+ lat_factor
     #+ bedrooms_missing
     + ad_floor
@@ -401,6 +455,8 @@ glm_mod <- logistic_reg() %>%
     + antall_skatteytere,
     data = finn_train
   )
+
+#summary(glm_mod$fit)
 
 # View summary
 #summary(glm_mod$fit)
